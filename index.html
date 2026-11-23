@@ -60,6 +60,8 @@
   .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
   .tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 4px; }
   .tile .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .tile.runtime .v { font-size: 26px; }
+  .tile.runtime .v.warn { color: var(--low); } .tile.runtime .v.crit { color: var(--high); }
   canvas { width: 100%; height: 150px; display: block; background: var(--panel);
     border: 1px solid var(--line); border-radius: 14px; }
   .row { display: flex; gap: 10px; } .row > * { flex: 1; }
@@ -106,6 +108,13 @@
     <div class="tile"><div class="label">Odczyt</div><div class="v" id="age">–</div><div class="s" id="alt">–</div></div>
   </div>
 
+  <div class="tile runtime">
+    <div class="label">Bateria starczy na</div>
+    <div class="v" id="runtime">–</div>
+    <div class="s" id="runtimeHow">–</div>
+    <div class="s" id="runtimeTrend"></div>
+  </div>
+
   <canvas id="chart" aria-label="Wykres ciśnienia z ostatnich 15 minut"></canvas>
 
   <div class="row">
@@ -124,6 +133,8 @@
     </select></label>
   <label class="f">Wibracja przy przekroczeniu <input id="setVib" type="checkbox"></label>
   <label class="f">Nie wygaszaj ekranu <input id="setWake" type="checkbox"></label>
+  <label class="f">Pojemność ogniwa (mAh) <input id="setCap" type="number" step="10" min="50" max="2000"></label>
+  <label class="f">Średni pobór czujnika (mA) <input id="setCur" type="number" step="0.05" min="0.01" max="20"></label>
   <div class="row" style="margin-top:14px">
     <button id="btnSleep">Uśpij czujnik</button>
     <button id="btnClose" class="primary">Gotowe</button>
@@ -144,7 +155,7 @@ const HPA_PER_PSI = 68.9476;
 const HISTORY_MS = 15 * 60 * 1000;
 
 const $ = id => document.getElementById(id);
-const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake: true },
+const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake: true, capMah: 250, curMa: 0.8 },
   JSON.parse(localStorage.getItem("pk-settings") || "{}"));
 
 let device = null, chars = {}, wakeLock = null, lastUpdate = 0, lastAlarm = 0;
@@ -184,6 +195,7 @@ function render() {
   $("temp").textContent = data.temp == null ? "–" : data.temp.toFixed(1).replace(".", ",") + "°";
   $("batt").textContent = data.batt == null ? "–" : data.batt + "%";
   $("vbat").textContent = data.vbat == null ? "–" : (data.vbat / 1000).toFixed(2).replace(".", ",") + " V";
+  renderRuntime();
   $("alt").textContent = history.length ? `${history.length} pkt / 15 min` : "–";
   drawChart();
 
@@ -247,13 +259,70 @@ function pushSample(psi) {
 }
 
 // ---------------------------------------------------------------------------
+// Prognoza czasu pracy baterii
+//  1) model: pozostała pojemność / średni pobór (ustawienia; domyślnie 250 mAh,
+//     80 % użyteczne, 0,8 mA) - "przy ciągłej pracy",
+//  2) trend: rzeczywisty spadek % z historii zapisywanej w telefonie
+//     (min. 12 h i 3 punkty procentowe), obejmuje też przerwy w uśpieniu.
+// ---------------------------------------------------------------------------
+const BATT_KEY = "pk-battlog";
+const USABLE = 0.8;                // użyteczna część pojemności LiPo
+let battLog = JSON.parse(localStorage.getItem(BATT_KEY) || "[]");
+
+function logBattery() {
+  if (data.batt == null) return;
+  const t = Date.now(), last = battLog[battLog.length - 1];
+  if (last && last.pct < data.batt - 5) battLog = [];        // ładowanie - nowa historia
+  if (!last || t - last.t > 10 * 60000 || last.pct !== data.batt) {
+    battLog.push({ t, pct: data.batt });
+    battLog = battLog.filter(p => t - p.t < 60 * 86400000).slice(-500);
+    if (!location.search.includes("demo")) localStorage.setItem(BATT_KEY, JSON.stringify(battLog));
+  }
+}
+
+function trendDaysLeft() {
+  if (battLog.length < 3 || data.batt == null) return null;
+  const t0 = battLog[0].t, n = battLog.length;
+  let sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (const p of battLog) { const x = (p.t - t0) / 86400000; sx += x; sy += p.pct; sxx += x * x; sxy += x * p.pct; }
+  const span = (battLog[n - 1].t - t0) / 3600000;
+  const drop = battLog[0].pct - battLog[n - 1].pct;
+  const den = n * sxx - sx * sx;
+  if (span < 12 || drop < 3 || den <= 0) return null;
+  const slope = (n * sxy - sx * sy) / den;          // % na dobę (ujemne)
+  return slope < 0 ? data.batt / -slope : null;
+}
+
+function fmtDuration(hours) {
+  if (hours < 1) return "< 1 godz.";
+  if (hours < 48) return `≈ ${Math.round(hours)} godz.`;
+  const d = hours / 24;
+  return `≈ ${d < 10 ? d.toFixed(1).replace(".", ",") : Math.round(d)} dni`;
+}
+
+function renderRuntime() {
+  const el = $("runtime");
+  if (data.batt == null) { el.textContent = "–"; return; }
+  const hours = data.batt / 100 * settings.capMah * USABLE / settings.curMa;
+  el.textContent = fmtDuration(hours) + " pracy";
+  el.className = "v" + (hours < 12 ? " crit" : hours < 48 ? " warn" : "");
+  $("runtimeHow").textContent =
+    `szacunek: ${data.batt}% z ${settings.capMah} mAh przy średnio ${String(settings.curMa).replace(".", ",")} mA` +
+    (hours < 48 ? " — naładuj przed spływem" : "");
+  const td = trendDaysLeft();
+  $("runtimeTrend").textContent = td == null
+    ? "Prognoza wg rzeczywistego zużycia pojawi się po ok. 12 h obserwacji."
+    : `Wg dotychczasowego zużycia (z uśpieniem): ${fmtDuration(td * 24)}`;
+}
+
+// ---------------------------------------------------------------------------
 // Bluetooth
 // ---------------------------------------------------------------------------
 const parse = {
   [CH_PSI]: dv => { data.psi = dv.getInt16(0, true) / 1000; pushSample(data.psi); },
   [CH_TEMP]: dv => { data.temp = dv.getInt16(0, true) / 100; },
   [CH_VBAT]: dv => { data.vbat = dv.getUint16(0, true); },
-  battery: dv => { data.batt = dv.getUint8(0); },
+  battery: dv => { data.batt = dv.getUint8(0); logBattery(); },
 };
 
 async function connect() {
@@ -349,6 +418,7 @@ $("btnSleep").onclick = async () => {
 $("btnSettings").onclick = () => {
   $("setLo").value = settings.lo; $("setHi").value = settings.hi; $("setUnit").value = settings.unit;
   $("setVib").checked = settings.vib; $("setWake").checked = settings.wake;
+  $("setCap").value = settings.capMah; $("setCur").value = settings.curMa;
   $("btnSleep").disabled = !chars.ctrl;
   $("settings").showModal();
 };
@@ -356,6 +426,9 @@ $("btnClose").onclick = () => {
   const lo = parseFloat($("setLo").value), hi = parseFloat($("setHi").value);
   if (lo >= 0 && hi > lo) { settings.lo = lo; settings.hi = hi; }
   settings.unit = $("setUnit").value; settings.vib = $("setVib").checked; settings.wake = $("setWake").checked;
+  const cap = parseFloat($("setCap").value), cur = parseFloat($("setCur").value);
+  if (cap >= 50) settings.capMah = cap;
+  if (cur > 0) settings.curMa = cur;
   localStorage.setItem("pk-settings", JSON.stringify(settings));
   $("settings").close();
   render();
@@ -370,6 +443,7 @@ if (!navigator.bluetooth && !location.search.includes("demo")) {
 // ---------------------------------------------------------------------------
 // Tryb demo: ?demo  (symulacja pompowania i nagrzewania - bez czujnika)
 // ---------------------------------------------------------------------------
+let demoLogged = false;
 if (location.search.includes("demo")) {
   setStatus("Tryb demo (dane symulowane)", "on");
   $("devname").textContent = "Packraft-PSI (demo)";
@@ -381,6 +455,11 @@ if (location.search.includes("demo")) {
     data.psi = 1.8 + 0.45 * Math.sin(s / 20) + (Math.random() - .5) * 0.02;
     data.temp = 21 + 6 * Math.sin(s / 40);
     data.vbat = 3950; data.batt = 79;
+    if (!demoLogged) {   // symulowana historia: 80% -> 79% w 2 dni
+      demoLogged = true;
+      battLog = [{ t: Date.now() - 2 * 86400000, pct: 84 }, { t: Date.now() - 86400000, pct: 81 }];
+    }
+    logBattery();
     pushSample(data.psi); render();
   }, 2000);
   render();

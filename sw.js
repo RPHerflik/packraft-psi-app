@@ -1,5 +1,5 @@
 // Packraft PSI - tryb offline (aplikacja działa na wodzie bez internetu)
-const CACHE = "packraft-psi-v1";
+const CACHE = "packraft-psi-v2";
 const FILES = ["./", "index.html", "manifest.webmanifest", "icon.svg", "icon-192.png", "icon-512.png"];
 
 self.addEventListener("install", e => {

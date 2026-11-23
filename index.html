@@ -136,9 +136,10 @@
   <label class="f">Pojemność ogniwa (mAh) <input id="setCap" type="number" step="10" min="50" max="2000"></label>
   <label class="f">Średni pobór czujnika (mA) <input id="setCur" type="number" step="0.05" min="0.01" max="20"></label>
   <div class="row" style="margin-top:14px">
+    <button id="btnResetBatt">Zeruj pomiar baterii</button>
     <button id="btnSleep">Uśpij czujnik</button>
-    <button id="btnClose" class="primary">Gotowe</button>
   </div>
+  <button id="btnClose" class="primary" style="width:100%;margin-top:10px">Gotowe</button>
   <p class="hint" style="margin-bottom:0">Anfibio zaleca ok. 1,5–2,0 PSI (sprawdź instrukcję swojego modelu).
     Na słońcu ciśnienie rośnie — upuść trochę powietrza, gdy przekroczy próg wysoki.</p>
 </dialog>
@@ -149,7 +150,7 @@
 // Protokół (firmware/README.md)
 // ---------------------------------------------------------------------------
 const UUID = n => `7a8b000${n}-5a1e-4c3b-9d2f-0c1e2a3b4c5d`;
-const SVC = UUID(1), CH_PSI = UUID(2), CH_TEMP = UUID(3), CH_VBAT = UUID(4), CH_CTRL = UUID(5);
+const SVC = UUID(1), CH_PSI = UUID(2), CH_TEMP = UUID(3), CH_VBAT = UUID(4), CH_CTRL = UUID(5), CH_RUN = UUID(6);
 const DEVICE_NAME = "Packraft-PSI";
 const HPA_PER_PSI = 68.9476;
 const HISTORY_MS = 15 * 60 * 1000;
@@ -160,7 +161,7 @@ const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake:
 
 let device = null, chars = {}, wakeLock = null, lastUpdate = 0, lastAlarm = 0;
 let userDisconnect = false, retry = 0;
-const data = { psi: null, temp: null, vbat: null, batt: null };
+const data = { psi: null, temp: null, vbat: null, batt: null, runH: null, curUa: null, sessH: null };
 const history = [];
 
 // ---------------------------------------------------------------------------
@@ -303,17 +304,25 @@ function fmtDuration(hours) {
 function renderRuntime() {
   const el = $("runtime");
   if (data.batt == null) { el.textContent = "–"; return; }
-  const hours = data.batt / 100 * settings.capMah * USABLE / settings.curMa;
+  const measured = data.runH != null;
+  const hours = measured ? data.runH : data.batt / 100 * settings.capMah * USABLE / settings.curMa;
   el.textContent = fmtDuration(hours) + " pracy";
   el.className = "v" + (hours < 12 ? " crit" : hours < 48 ? " warn" : "");
-  $("runtimeHow").textContent =
-    `szacunek: ${data.batt}% z ${settings.capMah} mAh przy średnio ${String(settings.curMa).replace(".", ",")} mA` +
-    (hours < 48 ? " — naładuj przed spływem" : "");
+  const ma = v => v.toFixed(2).replace(".", ",") + " mA";
+  let how;
+  if (measured) {
+    how = `zmierzone przez czujnik: śr. ${ma(data.curUa / 1000)} z ${fmtHours(data.sessH)} pracy od ładowania`;
+  } else {
+    how = `szacunek: ${data.batt}% z ${settings.capMah} mAh przy ${ma(settings.curMa)}`;
+    if (data.sessH != null) how += ` · czujnik mierzy zużycie (${fmtHours(data.sessH)} z min. 4 h)`;
+  }
+  $("runtimeHow").textContent = how + (hours < 48 ? " — naładuj przed spływem" : "");
   const td = trendDaysLeft();
-  $("runtimeTrend").textContent = td == null
-    ? "Prognoza wg rzeczywistego zużycia pojawi się po ok. 12 h obserwacji."
-    : `Wg dotychczasowego zużycia (z uśpieniem): ${fmtDuration(td * 24)}`;
+  $("runtimeTrend").textContent = td == null ? ""
+    : `Kalendarzowo (z przerwami w uśpieniu): ${fmtDuration(td * 24)}`;
 }
+
+function fmtHours(h) { return h < 10 ? h.toFixed(1).replace(".", ",") + " h" : Math.round(h) + " h"; }
 
 // ---------------------------------------------------------------------------
 // Bluetooth
@@ -322,6 +331,13 @@ const parse = {
   [CH_PSI]: dv => { data.psi = dv.getInt16(0, true) / 1000; pushSample(data.psi); },
   [CH_TEMP]: dv => { data.temp = dv.getInt16(0, true) / 100; },
   [CH_VBAT]: dv => { data.vbat = dv.getUint16(0, true); },
+  // czas pracy zmierzony przez czujnik (firmware >= 2): [h], [µA], seria [h*10]; 0xFFFF = brak danych
+  [CH_RUN]: dv => {
+    const h = dv.getUint16(0, true), ua = dv.getUint16(2, true);
+    data.runH = h === 0xFFFF ? null : h;
+    data.curUa = ua === 0xFFFF ? null : ua;
+    data.sessH = dv.getUint16(4, true) / 10;
+  },
   battery: dv => { data.batt = dv.getUint8(0); logBattery(); },
 };
 
@@ -358,6 +374,12 @@ async function connectGatt() {
     await c.startNotifications();
   }
   chars.ctrl = await svc.getCharacteristic(CH_CTRL);
+  try {                                  // starszy firmware nie ma tej charakterystyki
+    const c = await svc.getCharacteristic(CH_RUN);
+    parse[CH_RUN](await c.readValue());
+    c.addEventListener("characteristicvaluechanged", ev => { parse[CH_RUN](ev.target.value); render(); });
+    await c.startNotifications();
+  } catch (_) { data.runH = data.curUa = data.sessH = null; }
   try {
     const bs = await server.getPrimaryService("battery_service");
     const bl = await bs.getCharacteristic("battery_level");
@@ -415,11 +437,17 @@ $("btnSleep").onclick = async () => {
   try { await sendCommand(0x02); } catch (_) { }
   $("settings").close();
 };
+$("btnResetBatt").onclick = async () => {
+  if (!confirm("Wyzerować pomiar zużycia baterii w czujniku?\nCzujnik zacznie liczyć od nowa (wynik po ok. 4-5 h pracy).")) return;
+  try { await sendCommand(0x03); battLog = []; localStorage.removeItem(BATT_KEY); setStatus("Pomiar baterii wyzerowany", "on"); }
+  catch (e) { setStatus("Błąd: " + e.message, "err"); }
+};
 $("btnSettings").onclick = () => {
   $("setLo").value = settings.lo; $("setHi").value = settings.hi; $("setUnit").value = settings.unit;
   $("setVib").checked = settings.vib; $("setWake").checked = settings.wake;
   $("setCap").value = settings.capMah; $("setCur").value = settings.curMa;
   $("btnSleep").disabled = !chars.ctrl;
+  $("btnResetBatt").disabled = !chars.ctrl;
   $("settings").showModal();
 };
 $("btnClose").onclick = () => {
@@ -455,6 +483,7 @@ if (location.search.includes("demo")) {
     data.psi = 1.8 + 0.45 * Math.sin(s / 20) + (Math.random() - .5) * 0.02;
     data.temp = 21 + 6 * Math.sin(s / 40);
     data.vbat = 3950; data.batt = 79;
+    data.sessH = 37.5; data.curUa = 620; data.runH = Math.round(79 / (0.62 / 200 * 100));
     if (!demoLogged) {   // symulowana historia: 80% -> 79% w 2 dni
       demoLogged = true;
       battLog = [{ t: Date.now() - 2 * 86400000, pct: 84 }, { t: Date.now() - 86400000, pct: 81 }];

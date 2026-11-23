@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1418">
+<title>Packraft PSI</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #0e1418;
+    --panel: #172027;
+    --line: #26323b;
+    --text: #e9eef1;
+    --muted: #8a9aa5;
+    --ok: #3ddc84;
+    --low: #f5b041;
+    --high: #ff5c5c;
+    --accent: #ff8a3d;
+    --radius: 18px;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  body { min-height: 100svh; display: flex; flex-direction: column;
+    padding: max(14px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); gap: 14px; }
+  header { display: flex; align-items: center; gap: 10px; }
+  header h1 { font-size: 17px; font-weight: 650; margin: 0; letter-spacing: .2px; flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); box-shadow: 0 0 0 4px #3ddc8422; }
+  .dot.wait { background: var(--low); animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  #status { color: var(--muted); font-size: 13px; }
+  button { font: inherit; color: var(--text); background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 14px 16px; font-size: 16px; font-weight: 600; cursor: pointer; }
+  button:active { transform: scale(.98); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #1a0d03; }
+  button:disabled { opacity: .45; }
+  .icon-btn { padding: 8px 12px; font-size: 14px; border-radius: 12px; }
+
+  .gauge { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 22px 18px 18px; text-align: center; position: relative; transition: border-color .3s; }
+  .gauge.ok { border-color: #3ddc8466; } .gauge.low { border-color: #f5b04166; }
+  .gauge.high { border-color: var(--high); animation: alarm 1s infinite; }
+  @keyframes alarm { 50% { background: #3a1717; } }
+  .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: 1.2px; }
+  .big { font-size: clamp(76px, 26vw, 132px); font-weight: 750; line-height: 1; letter-spacing: -2px;
+    font-variant-numeric: tabular-nums; margin: 8px 0 4px; }
+  .unit { font-size: 20px; color: var(--muted); font-weight: 600; letter-spacing: 0; }
+  .state { font-size: 15px; font-weight: 650; min-height: 20px; }
+  .state.ok { color: var(--ok); } .state.low { color: var(--low); } .state.high { color: var(--high); }
+  .bar { height: 8px; border-radius: 4px; background: var(--line); margin-top: 14px; position: relative; overflow: hidden; }
+  .bar i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--ok); border-radius: 4px; transition: width .4s, background .3s; }
+  .bar b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); opacity: .5; }
+  .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 4px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .tile { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+  .tile .v { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 4px; }
+  .tile .s { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  canvas { width: 100%; height: 150px; display: block; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 14px; }
+  .row { display: flex; gap: 10px; } .row > * { flex: 1; }
+  .hint { color: var(--muted); font-size: 13px; line-height: 1.45; }
+  .err { color: var(--high); }
+  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; width: min(92vw, 420px); }
+  dialog::backdrop { background: #000a; }
+  dialog h2 { margin: 0 0 12px; font-size: 18px; }
+  label.f { display: flex; justify-content: space-between; align-items: center; gap: 10px; margin: 10px 0; font-size: 15px; }
+  label.f input[type=number] { width: 90px; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px; text-align: right; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <span id="dot" class="dot"></span>
+  <h1 id="devname">Packraft PSI</h1>
+  <button id="btnSettings" class="icon-btn" aria-label="Ustawienia">⚙</button>
+</header>
+<div id="status">Nie połączono</div>
+
+<section id="connectView">
+  <button id="btnConnect" class="primary" style="width:100%">Połącz z czujnikiem</button>
+  <p class="hint" id="supportHint">
+    Włącz Bluetooth i lokalizację w telefonie, naciśnij „Połącz” i wybierz <b>Packraft-PSI</b>.
+    Przed pompowaniem naciśnij RST na czujniku — ustawi zero (tara).
+  </p>
+</section>
+
+<section id="liveView" class="hidden" style="display:flex;flex-direction:column;gap:14px">
+  <div id="gauge" class="gauge">
+    <div class="label">Ciśnienie w komorze</div>
+    <div class="big"><span id="psi">–.––</span><span class="unit" id="unit"> PSI</span></div>
+    <div id="state" class="state"></div>
+    <div class="bar"><i id="barFill"></i><b id="barLo"></b><b id="barHi"></b></div>
+    <div class="scale"><span>0</span><span id="scaleMax">3 PSI</span></div>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="label">Temp.</div><div class="v" id="temp">–</div><div class="s">powietrze</div></div>
+    <div class="tile"><div class="label">Bateria</div><div class="v" id="batt">–</div><div class="s" id="vbat">–</div></div>
+    <div class="tile"><div class="label">Odczyt</div><div class="v" id="age">–</div><div class="s" id="alt">–</div></div>
+  </div>
+
+  <canvas id="chart" aria-label="Wykres ciśnienia z ostatnich 15 minut"></canvas>
+
+  <div class="row">
+    <button id="btnTare">Taruj 0,00</button>
+    <button id="btnDisconnect">Rozłącz</button>
+  </div>
+</section>
+
+<dialog id="settings">
+  <h2>Ustawienia</h2>
+  <label class="f">Próg niski (PSI) <input id="setLo" type="number" step="0.05" min="0" max="5"></label>
+  <label class="f">Próg wysoki (PSI) <input id="setHi" type="number" step="0.05" min="0" max="5"></label>
+  <label class="f">Jednostka
+    <select id="setUnit" style="font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:10px;padding:8px">
+      <option value="psi">PSI</option><option value="mbar">mbar</option><option value="kpa">kPa</option>
+    </select></label>
+  <label class="f">Wibracja przy przekroczeniu <input id="setVib" type="checkbox"></label>
+  <label class="f">Nie wygaszaj ekranu <input id="setWake" type="checkbox"></label>
+  <div class="row" style="margin-top:14px">
+    <button id="btnSleep">Uśpij czujnik</button>
+    <button id="btnClose" class="primary">Gotowe</button>
+  </div>
+  <p class="hint" style="margin-bottom:0">Anfibio zaleca ok. 1,5–2,0 PSI (sprawdź instrukcję swojego modelu).
+    Na słońcu ciśnienie rośnie — upuść trochę powietrza, gdy przekroczy próg wysoki.</p>
+</dialog>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Protokół (firmware/README.md)
+// ---------------------------------------------------------------------------
+const UUID = n => `7a8b000${n}-5a1e-4c3b-9d2f-0c1e2a3b4c5d`;
+const SVC = UUID(1), CH_PSI = UUID(2), CH_TEMP = UUID(3), CH_VBAT = UUID(4), CH_CTRL = UUID(5);
+const DEVICE_NAME = "Packraft-PSI";
+const HPA_PER_PSI = 68.9476;
+const HISTORY_MS = 15 * 60 * 1000;
+
+const $ = id => document.getElementById(id);
+const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake: true },
+  JSON.parse(localStorage.getItem("pk-settings") || "{}"));
+
+let device = null, chars = {}, wakeLock = null, lastUpdate = 0, lastAlarm = 0;
+let userDisconnect = false, retry = 0;
+const data = { psi: null, temp: null, vbat: null, batt: null };
+const history = [];
+
+// ---------------------------------------------------------------------------
+// Prezentacja
+// ---------------------------------------------------------------------------
+function fmtPressure(psi) {
+  if (psi == null) return "–.––";
+  if (settings.unit === "mbar") return Math.round(psi * HPA_PER_PSI).toString();
+  if (settings.unit === "kpa") return (psi * HPA_PER_PSI / 10).toFixed(1).replace(".", ",");
+  return psi.toFixed(2).replace(".", ",");
+}
+function unitLabel() { return { psi: " PSI", mbar: " mbar", kpa: " kPa" }[settings.unit]; }
+function classify(psi) { return psi == null ? "" : psi > settings.hi ? "high" : psi < settings.lo ? "low" : "ok"; }
+
+function render() {
+  const psi = data.psi;
+  const cls = classify(psi);
+  $("psi").textContent = fmtPressure(psi);
+  $("unit").textContent = unitLabel();
+  $("gauge").className = "gauge " + cls;
+  $("state").className = "state " + cls;
+  $("state").textContent = psi == null ? "" :
+    cls === "high" ? "Za wysokie — upuść powietrze" :
+    cls === "low" ? (psi < 0.15 ? "Brak ciśnienia" : "Za niskie — dopompuj") : "W normie";
+  const max = Math.max(3, settings.hi * 1.3);
+  $("scaleMax").textContent = fmtPressure(max) + unitLabel();
+  const fill = $("barFill");
+  fill.style.width = psi == null ? "0" : Math.min(100, Math.max(0, psi / max * 100)) + "%";
+  fill.style.background = `var(--${cls || "ok"})`;
+  $("barLo").style.left = settings.lo / max * 100 + "%";
+  $("barHi").style.left = settings.hi / max * 100 + "%";
+  $("temp").textContent = data.temp == null ? "–" : data.temp.toFixed(1).replace(".", ",") + "°";
+  $("batt").textContent = data.batt == null ? "–" : data.batt + "%";
+  $("vbat").textContent = data.vbat == null ? "–" : (data.vbat / 1000).toFixed(2).replace(".", ",") + " V";
+  $("alt").textContent = history.length ? `${history.length} pkt / 15 min` : "–";
+  drawChart();
+
+  if (cls === "high" && settings.vib && Date.now() - lastAlarm > 30000 && navigator.vibrate) {
+    navigator.vibrate([300, 150, 300]);
+    lastAlarm = Date.now();
+  }
+}
+
+function tickAge() {
+  if (!lastUpdate) return;
+  const s = Math.round((Date.now() - lastUpdate) / 1000);
+  $("age").textContent = s < 60 ? `${s} s` : `${Math.floor(s / 60)} min`;
+}
+setInterval(tickAge, 1000);
+
+function drawChart() {
+  const cv = $("chart"), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (!w) return;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext("2d");
+  g.scale(dpr, dpr);
+  const now = Date.now(), max = Math.max(3, settings.hi * 1.3);
+  const x = t => 8 + (w - 16) * (1 - (now - t) / HISTORY_MS);
+  const y = p => h - 18 - (h - 30) * Math.min(1, Math.max(0, p / max));
+  g.font = "11px system-ui"; g.fillStyle = "#8a9aa5";
+  // pas normy
+  g.fillStyle = "#3ddc8414";
+  g.fillRect(8, y(settings.hi), w - 16, y(settings.lo) - y(settings.hi));
+  g.strokeStyle = "#26323b"; g.lineWidth = 1;
+  [settings.lo, settings.hi].forEach(v => { g.beginPath(); g.moveTo(8, y(v)); g.lineTo(w - 8, y(v)); g.stroke(); });
+  g.fillStyle = "#8a9aa5";
+  g.fillText("15 min", 10, h - 4); g.fillText("teraz", w - 38, h - 4);
+  g.fillText(fmtPressure(settings.hi), w - 40, y(settings.hi) - 4);
+  if (history.length < 2) return;
+  g.strokeStyle = "#ff8a3d"; g.lineWidth = 2.5; g.lineJoin = "round";
+  g.beginPath();
+  history.forEach((pt, i) => i ? g.lineTo(x(pt.t), y(pt.psi)) : g.moveTo(x(pt.t), y(pt.psi)));
+  g.stroke();
+}
+window.addEventListener("resize", drawChart);
+
+function setStatus(text, state) {
+  $("status").textContent = text;
+  $("status").classList.toggle("err", state === "err");
+  $("dot").className = "dot " + (state === "on" ? "on" : state === "wait" ? "wait" : "");
+}
+
+function showLive(on) {
+  $("connectView").classList.toggle("hidden", on);
+  $("liveView").classList.toggle("hidden", !on);
+}
+
+function pushSample(psi) {
+  const t = Date.now();
+  history.push({ t, psi });
+  while (history.length && t - history[0].t > HISTORY_MS) history.shift();
+  lastUpdate = t;
+  tickAge();
+}
+
+// ---------------------------------------------------------------------------
+// Bluetooth
+// ---------------------------------------------------------------------------
+const parse = {
+  [CH_PSI]: dv => { data.psi = dv.getInt16(0, true) / 1000; pushSample(data.psi); },
+  [CH_TEMP]: dv => { data.temp = dv.getInt16(0, true) / 100; },
+  [CH_VBAT]: dv => { data.vbat = dv.getUint16(0, true); },
+  battery: dv => { data.batt = dv.getUint8(0); },
+};
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    setStatus("Ta przeglądarka nie obsługuje Bluetooth — użyj Chrome na Androidzie.", "err");
+    return;
+  }
+  try {
+    setStatus("Wybierz czujnik z listy…", "wait");
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: DEVICE_NAME }, { services: [SVC] }],
+      optionalServices: [SVC, "battery_service"],
+    });
+    device.addEventListener("gattserverdisconnected", onDisconnected);
+    userDisconnect = false;
+    await connectGatt();
+  } catch (e) {
+    if (e.name === "NotFoundError") setStatus("Nie wybrano czujnika", "");
+    else setStatus("Błąd: " + e.message, "err");
+  }
+}
+
+async function connectGatt() {
+  setStatus("Łączenie z " + (device.name || "czujnikiem") + "…", "wait");
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  chars = {};
+  for (const uuid of [CH_PSI, CH_TEMP, CH_VBAT]) {
+    const c = await svc.getCharacteristic(uuid);
+    chars[uuid] = c;
+    parse[uuid](await c.readValue());
+    c.addEventListener("characteristicvaluechanged", ev => { parse[uuid](ev.target.value); render(); });
+    await c.startNotifications();
+  }
+  chars.ctrl = await svc.getCharacteristic(CH_CTRL);
+  try {
+    const bs = await server.getPrimaryService("battery_service");
+    const bl = await bs.getCharacteristic("battery_level");
+    parse.battery(await bl.readValue());
+    bl.addEventListener("characteristicvaluechanged", ev => { parse.battery(ev.target.value); render(); });
+    await bl.startNotifications();
+  } catch (_) { /* brak serwisu baterii - pomijamy */ }
+  retry = 0;
+  $("devname").textContent = device.name || "Packraft PSI";
+  setStatus("Połączono", "on");
+  showLive(true);
+  render();
+  requestWake();
+}
+
+async function onDisconnected() {
+  if (userDisconnect) { setStatus("Rozłączono", ""); showLive(false); return; }
+  setStatus("Utracono połączenie — ponawiam…", "wait");
+  while (!userDisconnect && device && !device.gatt.connected) {
+    const delay = Math.min(30000, 1000 * 2 ** retry++);
+    await new Promise(r => setTimeout(r, delay));
+    try { await connectGatt(); } catch (e) { setStatus(`Brak zasięgu, ponowna próba za ${Math.round(delay / 1000)} s`, "wait"); }
+  }
+}
+
+async function sendCommand(byte) {
+  if (!chars.ctrl) return;
+  await chars.ctrl.writeValueWithResponse(new Uint8Array([byte]));
+}
+
+// ---------------------------------------------------------------------------
+// Ekran zawsze włączony (Wake Lock)
+// ---------------------------------------------------------------------------
+async function requestWake() {
+  if (!settings.wake || !("wakeLock" in navigator) || wakeLock) return;
+  try {
+    wakeLock = await navigator.wakeLock.request("screen");
+    wakeLock.addEventListener("release", () => { wakeLock = null; });
+  } catch (_) { }
+}
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") requestWake(); });
+
+// ---------------------------------------------------------------------------
+// Interfejs
+// ---------------------------------------------------------------------------
+$("btnConnect").onclick = connect;
+$("btnDisconnect").onclick = () => { userDisconnect = true; device && device.gatt.disconnect(); };
+$("btnTare").onclick = async () => {
+  if (!confirm("Ustawić obecne ciśnienie jako 0,00?\nRób to tylko przy otwartym zaworze (łódka bez ciśnienia).")) return;
+  try { await sendCommand(0x01); setStatus("Tara wysłana", "on"); } catch (e) { setStatus("Błąd tary: " + e.message, "err"); }
+};
+$("btnSleep").onclick = async () => {
+  if (!confirm("Uśpić czujnik? Wybudzisz go tylko przyciskiem RST.")) return;
+  userDisconnect = true;
+  try { await sendCommand(0x02); } catch (_) { }
+  $("settings").close();
+};
+$("btnSettings").onclick = () => {
+  $("setLo").value = settings.lo; $("setHi").value = settings.hi; $("setUnit").value = settings.unit;
+  $("setVib").checked = settings.vib; $("setWake").checked = settings.wake;
+  $("btnSleep").disabled = !chars.ctrl;
+  $("settings").showModal();
+};
+$("btnClose").onclick = () => {
+  const lo = parseFloat($("setLo").value), hi = parseFloat($("setHi").value);
+  if (lo >= 0 && hi > lo) { settings.lo = lo; settings.hi = hi; }
+  settings.unit = $("setUnit").value; settings.vib = $("setVib").checked; settings.wake = $("setWake").checked;
+  localStorage.setItem("pk-settings", JSON.stringify(settings));
+  $("settings").close();
+  render();
+  if (settings.wake) requestWake(); else if (wakeLock) wakeLock.release();
+};
+
+if (!navigator.bluetooth && !location.search.includes("demo")) {
+  $("supportHint").innerHTML = "<span class='err'>Ta przeglądarka nie obsługuje Web Bluetooth.</span> " +
+    "Otwórz stronę w <b>Chrome na Androidzie</b> (adres https).";
+}
+
+// ---------------------------------------------------------------------------
+// Tryb demo: ?demo  (symulacja pompowania i nagrzewania - bez czujnika)
+// ---------------------------------------------------------------------------
+if (location.search.includes("demo")) {
+  setStatus("Tryb demo (dane symulowane)", "on");
+  $("devname").textContent = "Packraft-PSI (demo)";
+  showLive(true);
+  const t0 = Date.now();
+  for (let i = 90; i > 0; i--) history.push({ t: t0 - i * 10000, psi: Math.min(1.8, Math.max(0, (90 - i) * 0.04)) });
+  setInterval(() => {
+    const s = (Date.now() - t0) / 1000;
+    data.psi = 1.8 + 0.45 * Math.sin(s / 20) + (Math.random() - .5) * 0.02;
+    data.temp = 21 + 6 * Math.sin(s / 40);
+    data.vbat = 3950; data.batt = 79;
+    pushSample(data.psi); render();
+  }, 2000);
+  render();
+}
+
+if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js");
+</script>
+</body>
+</html>

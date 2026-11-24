@@ -75,12 +75,23 @@
   label.f input[type=number] { width: 90px; font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--line); border-radius: 10px; padding: 8px; text-align: right; }
   .hidden { display: none !important; }
+  .sess-list { display: flex; flex-direction: column; gap: 8px; }
+  .sess { text-align: left; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px; padding: 12px 14px; }
+  .sess .d { font-weight: 650; }
+  .sess .m { color: var(--muted); font-size: 13px; font-weight: 500; }
+  .sess .p { grid-row: span 2; align-self: center; font-size: 20px; font-variant-numeric: tabular-nums; }
+  .src { font-size: 11px; padding: 2px 6px; border-radius: 6px; background: var(--line); color: var(--muted); margin-left: 6px; }
+  .map { height: 260px; border-radius: 14px; border: 1px solid var(--line); background: var(--panel); }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); margin-top: -6px; }
+  .lg::before { content: ""; display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .lg.psi::before { background: #ff8a3d; } .lg.tmp::before { background: #4aa8ff; }
 </style>
 </head>
 <body>
 <header>
   <span id="dot" class="dot"></span>
   <h1 id="devname">Packraft PSI</h1>
+  <button id="btnHistory" class="icon-btn" aria-label="Historia">Historia</button>
   <button id="btnSettings" class="icon-btn" aria-label="Ustawienia">⚙</button>
 </header>
 <div id="status">Nie połączono</div>
@@ -123,6 +134,29 @@
   </div>
 </section>
 
+<section id="historyView" class="hidden" style="display:flex;flex-direction:column;gap:12px">
+  <div class="row">
+    <button id="btnHistBack">← Wróć</button>
+    <button id="btnImport">Import z zegarka</button>
+  </div>
+  <input id="fileFit" type="file" accept=".fit,.zip" class="hidden">
+  <p class="hint" style="margin:0">Telefon zapisuje próbkę co 10 s, gdy jest połączony z czujnikiem (z GPS).
+    Aktywność z zegarka: Garmin Connect → aktywność → ⋮ → <b>Eksportuj plik</b>, potem „Import z zegarka”.</p>
+  <div id="sessList" class="sess-list"></div>
+  <div id="sessDetail" class="hidden" style="display:flex;flex-direction:column;gap:12px">
+    <div class="label" id="sessTitle"></div>
+    <div class="tiles" id="sessStats"></div>
+    <canvas id="histChart" style="height:210px" aria-label="Wykres ciśnienia i temperatury"></canvas>
+    <div class="legend"><span class="lg psi">Ciśnienie [PSI]</span><span class="lg tmp">Temperatura [°C]</span></div>
+    <div id="map" class="map"></div>
+    <div class="row">
+      <button id="btnCsv">CSV</button>
+      <button id="btnGpx">GPX (mapa)</button>
+      <button id="btnDelSess">Usuń</button>
+    </div>
+  </div>
+</section>
+
 <dialog id="settings">
   <h2>Ustawienia</h2>
   <label class="f">Próg niski (PSI) <input id="setLo" type="number" step="0.05" min="0" max="5"></label>
@@ -133,6 +167,7 @@
     </select></label>
   <label class="f">Wibracja przy przekroczeniu <input id="setVib" type="checkbox"></label>
   <label class="f">Nie wygaszaj ekranu <input id="setWake" type="checkbox"></label>
+  <label class="f">Zapisuj historię (z GPS) <input id="setRec" type="checkbox"></label>
   <label class="f">Pojemność ogniwa (mAh) <input id="setCap" type="number" step="10" min="50" max="2000"></label>
   <label class="f">Średni pobór czujnika (mA) <input id="setCur" type="number" step="0.05" min="0.01" max="20"></label>
   <div class="row" style="margin-top:14px">
@@ -144,6 +179,7 @@
     Na słońcu ciśnienie rośnie — upuść trochę powietrza, gdy przekroczy próg wysoki.</p>
 </dialog>
 
+<script src="history.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
@@ -156,7 +192,7 @@ const HPA_PER_PSI = 68.9476;
 const HISTORY_MS = 15 * 60 * 1000;
 
 const $ = id => document.getElementById(id);
-const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake: true, capMah: 250, curMa: 0.8 },
+const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake: true, capMah: 250, curMa: 0.8, rec: true },
   JSON.parse(localStorage.getItem("pk-settings") || "{}"));
 
 let device = null, chars = {}, wakeLock = null, lastUpdate = 0, lastAlarm = 0;
@@ -328,7 +364,7 @@ function fmtHours(h) { return h < 10 ? h.toFixed(1).replace(".", ",") + " h" : M
 // Bluetooth
 // ---------------------------------------------------------------------------
 const parse = {
-  [CH_PSI]: dv => { data.psi = dv.getInt16(0, true) / 1000; pushSample(data.psi); },
+  [CH_PSI]: dv => { data.psi = dv.getInt16(0, true) / 1000; pushSample(data.psi); if (settings.rec) Hist.record(data); },
   [CH_TEMP]: dv => { data.temp = dv.getInt16(0, true) / 100; },
   [CH_VBAT]: dv => { data.vbat = dv.getUint16(0, true); },
   // czas pracy zmierzony przez czujnik (firmware >= 2): [h], [µA], seria [h*10]; 0xFFFF = brak danych
@@ -396,10 +432,11 @@ async function connectGatt() {
   showLive(true);
   render();
   requestWake();
+  if (settings.rec) Hist.startGps();
 }
 
 async function onDisconnected() {
-  if (userDisconnect) { setStatus("Rozłączono", ""); showLive(false); return; }
+  if (userDisconnect) { setStatus("Rozłączono", ""); showLive(false); Hist.stopGps(); return; }
   setStatus("Utracono połączenie — ponawiam…", "wait");
   while (!userDisconnect && device && !device.gatt.connected) {
     const delay = Math.min(30000, 1000 * 2 ** retry++);
@@ -447,7 +484,7 @@ $("btnResetBatt").onclick = async () => {
 };
 $("btnSettings").onclick = () => {
   $("setLo").value = settings.lo; $("setHi").value = settings.hi; $("setUnit").value = settings.unit;
-  $("setVib").checked = settings.vib; $("setWake").checked = settings.wake;
+  $("setVib").checked = settings.vib; $("setWake").checked = settings.wake; $("setRec").checked = settings.rec;
   $("setCap").value = settings.capMah; $("setCur").value = settings.curMa;
   $("btnSleep").disabled = !chars.ctrl;
   $("btnResetBatt").disabled = !chars.ctrl;
@@ -457,6 +494,8 @@ $("btnClose").onclick = () => {
   const lo = parseFloat($("setLo").value), hi = parseFloat($("setHi").value);
   if (lo >= 0 && hi > lo) { settings.lo = lo; settings.hi = hi; }
   settings.unit = $("setUnit").value; settings.vib = $("setVib").checked; settings.wake = $("setWake").checked;
+  settings.rec = $("setRec").checked;
+  if (settings.rec && device && device.gatt.connected) Hist.startGps(); else if (!settings.rec) Hist.stopGps();
   const cap = parseFloat($("setCap").value), cur = parseFloat($("setCur").value);
   if (cap >= 50) settings.capMah = cap;
   if (cur > 0) settings.curMa = cur;
@@ -470,6 +509,185 @@ if (!navigator.bluetooth && !location.search.includes("demo")) {
   $("supportHint").innerHTML = "<span class='err'>Ta przeglądarka nie obsługuje Web Bluetooth.</span> " +
     "Otwórz stronę w <b>Chrome na Androidzie</b> (adres https).";
 }
+
+// ---------------------------------------------------------------------------
+// Historia: lista sesji, wykres, mapa, eksport
+// ---------------------------------------------------------------------------
+let histSessions = [], curSess = null, leafletMap = null, leafletLayer = null;
+const fmtDate = t => new Date(t).toLocaleString("pl-PL", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const fmtTime = t => new Date(t).toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" });
+const fmtDur = ms => { const m = Math.round(ms / 60000); return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${m % 60} min`; };
+const dec = (v, d) => v == null ? "–" : v.toFixed(d).replace(".", ",");
+
+async function openHistory() {
+  $("connectView").classList.add("hidden");
+  $("liveView").classList.add("hidden");
+  $("historyView").classList.remove("hidden");
+  $("sessDetail").classList.add("hidden");
+  await renderSessions();
+}
+
+function closeHistory() {
+  $("historyView").classList.add("hidden");
+  showLive(!!(device && device.gatt.connected) || location.search.includes("demo"));
+}
+
+async function renderSessions() {
+  histSessions = await Hist.listSessions();
+  if (location.search.includes("demo")) histSessions.unshift(demoSession());
+  const box = $("sessList");
+  box.innerHTML = "";
+  if (!histSessions.length) {
+    box.innerHTML = "<p class='hint'>Brak zapisanych sesji. Połącz się z czujnikiem — telefon zacznie zapisywać historię.</p>";
+    return;
+  }
+  for (const s of histSessions) {
+    const b = document.createElement("button");
+    b.className = "sess";
+    b.innerHTML = `<span class="d">${fmtDate(s.t0)}<span class="src">${s.source === "watch" ? "zegarek" : "telefon"}</span></span>
+      <span class="p">${dec(s.maxPsi, 2)}</span>
+      <span class="m">${fmtDur(s.t1 - s.t0)} · temp. ${dec(s.minTemp, 0)}–${dec(s.maxTemp, 0)}°C${s.gps ? " · GPS" : ""}</span>`;
+    b.onclick = () => openSession(s);
+    box.appendChild(b);
+  }
+}
+
+function openSession(s) {
+  curSess = s;
+  $("sessDetail").classList.remove("hidden");
+  $("sessTitle").textContent = `${fmtDate(s.t0)} – ${fmtTime(s.t1)} (${fmtDur(s.t1 - s.t0)})`;
+  $("sessStats").innerHTML = `
+    <div class="tile"><div class="label">Maks.</div><div class="v">${dec(s.maxPsi, 2)}</div><div class="s">PSI</div></div>
+    <div class="tile"><div class="label">Min.</div><div class="v">${dec(s.minPsi, 2)}</div><div class="s">PSI (po napompowaniu)</div></div>
+    <div class="tile"><div class="label">Temp.</div><div class="v">${dec(s.maxTemp, 0)}°</div><div class="s">maks., min. ${dec(s.minTemp, 0)}°</div></div>`;
+  $("btnGpx").disabled = !s.gps;
+  $("btnDelSess").disabled = s.id === "demo";
+  drawHistChart(s);
+  showMap(s);
+  $("sessDetail").scrollIntoView({ behavior: "smooth" });
+}
+
+function drawHistChart(s) {
+  const cv = $("histChart"), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext("2d");
+  g.scale(dpr, dpr);
+  const pts = s.samples, t0 = s.t0, t1 = Math.max(s.t1, t0 + 1);
+  const L = 34, R = 34, T = 10, B = 22;
+  const ps = pts.map(p => p.psi).filter(v => v != null), ts = pts.map(p => p.temp).filter(v => v != null);
+  const pMax = Math.max(settings.hi * 1.2, ...ps, 0.5);
+  const tMin = Math.floor(Math.min(...ts, 10) / 5) * 5, tMax = Math.ceil(Math.max(...ts, 20) / 5) * 5;
+  const x = t => L + (w - L - R) * (t - t0) / (t1 - t0);
+  const yP = v => h - B - (h - B - T) * v / pMax;
+  const yT = v => h - B - (h - B - T) * (v - tMin) / (tMax - tMin || 1);
+  g.font = "11px system-ui"; g.lineWidth = 1;
+  g.fillStyle = "#3ddc8414";                                   // pas normy ciśnienia
+  g.fillRect(L, yP(settings.hi), w - L - R, yP(settings.lo) - yP(settings.hi));
+  g.strokeStyle = "#26323b";
+  for (let i = 0; i <= 4; i++) { const yy = T + (h - B - T) * i / 4; g.beginPath(); g.moveTo(L, yy); g.lineTo(w - R, yy); g.stroke(); }
+  g.fillStyle = "#ff8a3d"; g.textAlign = "right";
+  for (let i = 0; i <= 4; i++) g.fillText(dec(pMax * (4 - i) / 4, 1), L - 4, T + (h - B - T) * i / 4 + 4);
+  g.fillStyle = "#4aa8ff"; g.textAlign = "left";
+  for (let i = 0; i <= 4; i++) g.fillText(Math.round(tMax - (tMax - tMin) * i / 4) + "°", w - R + 4, T + (h - B - T) * i / 4 + 4);
+  g.fillStyle = "#8a9aa5"; g.textAlign = "center";
+  for (let i = 0; i <= 4; i++) { const t = t0 + (t1 - t0) * i / 4; g.fillText(fmtTime(t), x(t), h - 6); }
+  const line = (key, y, color) => {
+    g.strokeStyle = color; g.lineWidth = 2.2; g.lineJoin = "round"; g.beginPath();
+    let started = false, prevT = 0;
+    for (const p of pts) {
+      if (p[key] == null) continue;
+      const gap = started && p.t - prevT > 5 * 60000;        // przerwa w danych - nie łącz
+      if (!started || gap) g.moveTo(x(p.t), y(p[key])); else g.lineTo(x(p.t), y(p[key]));
+      started = true; prevT = p.t;
+    }
+    g.stroke();
+  };
+  line("temp", yT, "#4aa8ff");
+  line("psi", yP, "#ff8a3d");
+}
+
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet"; css.href = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = "https://unpkg.com/leaflet@1.9.4/dist/leaflet.js";
+    js.onload = resolve; js.onerror = reject;
+    document.head.appendChild(js);
+  });
+}
+
+async function showMap(s) {
+  const box = $("map");
+  const geo = s.samples.filter(p => p.lat != null);
+  if (!geo.length) { box.innerHTML = "<p class='hint' style='padding:14px'>Ta sesja nie ma pozycji GPS.</p>"; leafletMap = null; return; }
+  try { await loadLeaflet(); } catch (_) {
+    box.innerHTML = "<p class='hint' style='padding:14px'>Mapa wymaga internetu.</p>"; leafletMap = null; return;
+  }
+  if (!leafletMap) {
+    box.innerHTML = "";
+    leafletMap = L.map(box, { attributionControl: true });
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 18, attribution: "© OpenStreetMap" }).addTo(leafletMap);
+  }
+  if (leafletLayer) leafletLayer.remove();
+  leafletLayer = L.layerGroup().addTo(leafletMap);
+  // ślad pokolorowany ciśnieniem (zielony = norma, pomarańczowy = nisko, czerwony = wysoko)
+  const color = p => p.psi == null ? "#8a9aa5" : p.psi > settings.hi ? "#ff5c5c" : p.psi < settings.lo ? "#f5b041" : "#3ddc84";
+  for (let i = 1; i < geo.length; i++) {
+    L.polyline([[geo[i - 1].lat, geo[i - 1].lon], [geo[i].lat, geo[i].lon]], { color: color(geo[i]), weight: 5 }).addTo(leafletLayer);
+  }
+  const step = Math.max(1, Math.floor(geo.length / 40));          // punkty z opisem
+  for (let i = 0; i < geo.length; i += step) {
+    const p = geo[i];
+    L.circleMarker([p.lat, p.lon], { radius: 4, color: "#0e1418", weight: 1, fillColor: color(p), fillOpacity: 1 })
+      .bindPopup(`${fmtTime(p.t)}<br><b>${dec(p.psi, 2)} PSI</b> · ${dec(p.temp, 1)}°C`).addTo(leafletLayer);
+  }
+  leafletMap.fitBounds(L.latLngBounds(geo.map(p => [p.lat, p.lon])), { padding: [20, 20] });
+  setTimeout(() => leafletMap.invalidateSize(), 50);
+}
+
+// Sesja demonstracyjna (tylko ?demo): spływ 2 h z nagrzewaniem w słońcu
+function demoSession() {
+  const t0 = new Date(); t0.setHours(10, 0, 0, 0);
+  const samples = [];
+  for (let i = 0; i <= 720; i++) {
+    const t = t0.getTime() + i * 10000, k = i / 720;
+    const psi = i < 30 ? i * 0.06 : 1.75 + 0.45 * Math.sin(k * Math.PI) + (Math.random() - .5) * 0.02;
+    samples.push({ t, psi, temp: 16 + 12 * Math.sin(k * Math.PI), batt: 80,
+      lat: 49.4300 + 0.025 * k + 0.004 * Math.sin(k * 12), lon: 20.4200 + 0.06 * k });
+  }
+  return Object.assign({ id: "demo", source: "phone", samples, t0: samples[0].t, t1: samples[samples.length - 1].t,
+    n: samples.length, gps: true }, {
+    maxPsi: Math.max(...samples.map(s => s.psi)), minPsi: 1.75,
+    maxTemp: 28, minTemp: 16 });
+}
+
+$("btnHistory").onclick = openHistory;
+$("btnHistBack").onclick = closeHistory;
+$("btnImport").onclick = () => $("fileFit").click();
+$("fileFit").onchange = async ev => {
+  const f = ev.target.files[0];
+  ev.target.value = "";
+  if (!f) return;
+  try {
+    const id = await Hist.importFile(f);
+    await renderSessions();
+    const s = histSessions.find(x => x.id === id);
+    if (s) openSession(s);
+  } catch (e) { alert("Nie udało się wczytać pliku: " + e.message); }
+};
+$("btnCsv").onclick = () => curSess && Hist.exportSession(curSess, "csv");
+$("btnGpx").onclick = () => curSess && Hist.exportSession(curSess, "gpx");
+$("btnDelSess").onclick = async () => {
+  if (!curSess || !confirm("Usunąć tę sesję z telefonu?")) return;
+  await Hist.deleteSession(curSess);
+  $("sessDetail").classList.add("hidden");
+  await renderSessions();
+};
+window.addEventListener("resize", () => curSess && !$("historyView").classList.contains("hidden") && drawHistChart(curSess));
 
 // ---------------------------------------------------------------------------
 // Tryb demo: ?demo  (symulacja pompowania i nagrzewania - bez czujnika)

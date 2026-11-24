@@ -334,9 +334,12 @@ const parse = {
   // czas pracy zmierzony przez czujnik (firmware >= 2): [h], [µA], seria [h*10]; 0xFFFF = brak danych
   [CH_RUN]: dv => {
     const h = dv.getUint16(0, true), ua = dv.getUint16(2, true);
-    data.runH = h === 0xFFFF ? null : h;
-    data.curUa = ua === 0xFFFF ? null : ua;
     data.sessH = dv.getUint16(4, true) / 10;
+    // wynik ważny tylko po min. 4 h pomiaru i w rozsądnym zakresie
+    // (firmware sprzed poprawki -Ofast potrafił wysłać śmieci zamiast 0xFFFF)
+    const valid = h !== 0xFFFF && ua !== 0xFFFF && data.sessH >= 4 && h <= 20000 && ua >= 5 && ua <= 30000;
+    data.runH = valid ? h : null;
+    data.curUa = valid ? ua : null;
   },
   battery: dv => { data.batt = dv.getUint8(0); logBattery(); },
 };

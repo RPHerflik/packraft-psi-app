@@ -187,6 +187,7 @@
 // ---------------------------------------------------------------------------
 const UUID = n => `7a8b000${n}-5a1e-4c3b-9d2f-0c1e2a3b4c5d`;
 const SVC = UUID(1), CH_PSI = UUID(2), CH_TEMP = UUID(3), CH_VBAT = UUID(4), CH_CTRL = UUID(5), CH_RUN = UUID(6);
+const CH_RES = UUID(7);   // wynik polecenia: [polecenie, wynik] (firmware z potwierdzeniem tary)
 const DEVICE_NAME = "Packraft-PSI";
 const HPA_PER_PSI = 68.9476;
 const HISTORY_MS = 15 * 60 * 1000;
@@ -429,6 +430,11 @@ async function connectGatt() {
     c.addEventListener("characteristicvaluechanged", ev => { parse[CH_RUN](ev.target.value); render(); });
     await c.startNotifications();
   } catch (_) { data.runH = data.curUa = data.sessH = null; }
+  try {                                  // potwierdzenia poleceń (nowszy firmware)
+    chars.res = await svc.getCharacteristic(CH_RES);
+    chars.res.addEventListener("characteristicvaluechanged", ev => onCmdResult(ev.target.value));
+    await chars.res.startNotifications();
+  } catch (_) { chars.res = null; }
   try {
     const bs = await server.getPrimaryService("battery_service");
     const bl = await bs.getCharacteristic("battery_level");
@@ -455,9 +461,29 @@ async function onDisconnected() {
   }
 }
 
+// Wynik polecenia z 7a8b0007: 0 w toku, 1 wykonano, 2 tara odrzucona (komora pod ciśnieniem),
+// 3 tara odrzucona (brak odczytu z czujnika), 255 nieznane polecenie. null = firmware bez potwierdzeń.
+const CMD = { PENDING: 0, OK: 1, NOT_ATMOSPHERE: 2, NO_SENSOR: 3 };
+let cmdWaiters = [];
+function onCmdResult(dv) {
+  const cmd = dv.getUint8(0), res = dv.getUint8(1);
+  if (res === CMD.PENDING) return;
+  cmdWaiters = cmdWaiters.filter(w => { if (w.cmd !== cmd) return true; w.resolve(res); return false; });
+}
 async function sendCommand(byte) {
-  if (!chars.ctrl) return;
+  if (!chars.ctrl) return null;
+  const result = !chars.res ? Promise.resolve(null) : new Promise(resolve => {
+    const w = { cmd: byte, resolve };
+    cmdWaiters.push(w);
+    setTimeout(async () => {                       // bez powiadomienia: jeszcze jeden odczyt
+      if (!cmdWaiters.includes(w)) return;
+      cmdWaiters = cmdWaiters.filter(x => x !== w);
+      try { const dv = await chars.res.readValue(); resolve(dv.getUint8(0) === byte && dv.getUint8(1) !== CMD.PENDING ? dv.getUint8(1) : null); }
+      catch (_) { resolve(null); }
+    }, 4000);
+  });
   await chars.ctrl.writeValueWithResponse(new Uint8Array([byte]));
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -479,7 +505,14 @@ $("btnConnect").onclick = connect;
 $("btnDisconnect").onclick = () => { userDisconnect = true; device && device.gatt.disconnect(); };
 $("btnTare").onclick = async () => {
   if (!confirm("Ustawić obecne ciśnienie jako 0,00?\nRób to tylko przy otwartym zaworze (łódka bez ciśnienia).")) return;
-  try { await sendCommand(0x01); setStatus("Tara wysłana", "on"); } catch (e) { setStatus("Błąd tary: " + e.message, "err"); }
+  setStatus("Taruję…", "wait");
+  try {
+    const r = await sendCommand(0x01);
+    if (r === CMD.OK) setStatus("Tara wykonana: 0,00", "on");
+    else if (r === CMD.NOT_ATMOSPHERE) setStatus("Tara odrzucona: łódka jest pod ciśnieniem. Otwórz zawór i spróbuj ponownie.", "err");
+    else if (r === CMD.NO_SENSOR) setStatus("Tara odrzucona: brak odczytu z czujnika", "err");
+    else setStatus("Tara wysłana (czujnik nie potwierdza wyniku)", "on");
+  } catch (e) { setStatus("Błąd tary: " + e.message, "err"); }
 };
 $("btnSleep").onclick = async () => {
   if (!confirm("Uśpić czujnik? Wybudzisz go tylko przyciskiem RST.")) return;

@@ -195,6 +195,16 @@ const $ = id => document.getElementById(id);
 const settings = Object.assign({ lo: 1.5, hi: 2.1, unit: "psi", vib: true, wake: true, capMah: 250, curMa: 0.8, rec: true },
   JSON.parse(localStorage.getItem("pk-settings") || "{}"));
 
+// Symulator (demo 3D, adres z ?sim w ramce): Bluetooth i zegar dostarcza okno nadrzędne,
+// w którym działa firmware skompilowany do WebAssembly (modele_3d/demo_3d).
+const SIM = location.search.includes("sim") && window.parent !== window && window.parent.pkSim ? window.parent.pkSim : null;
+if (SIM) {
+  Date.now = () => SIM.now();                 // czas symulacji, także przy przyspieszeniu
+  settings.rec = false; settings.wake = false; // bez GPS i blokady ekranu
+}
+const BT = SIM ? SIM.bluetooth : navigator.bluetooth;
+const vibrate = SIM ? SIM.vibrate : navigator.vibrate ? p => navigator.vibrate(p) : null;
+
 let device = null, chars = {}, wakeLock = null, lastUpdate = 0, lastAlarm = 0;
 let userDisconnect = false, retry = 0;
 const data = { psi: null, temp: null, vbat: null, batt: null, runH: null, curUa: null, sessH: null };
@@ -236,8 +246,8 @@ function render() {
   $("alt").textContent = history.length ? `${history.length} pkt / 15 min` : "–";
   drawChart();
 
-  if (cls === "high" && settings.vib && Date.now() - lastAlarm > 30000 && navigator.vibrate) {
-    navigator.vibrate([300, 150, 300]);
+  if (cls === "high" && settings.vib && Date.now() - lastAlarm > 30000 && vibrate) {
+    vibrate([300, 150, 300]);
     lastAlarm = Date.now();
   }
 }
@@ -304,7 +314,7 @@ function pushSample(psi) {
 // ---------------------------------------------------------------------------
 const BATT_KEY = "pk-battlog";
 const USABLE = 0.8;                // użyteczna część pojemności LiPo
-let battLog = JSON.parse(localStorage.getItem(BATT_KEY) || "[]");
+let battLog = SIM ? [] : JSON.parse(localStorage.getItem(BATT_KEY) || "[]");
 
 function logBattery() {
   if (data.batt == null) return;
@@ -313,7 +323,7 @@ function logBattery() {
   if (!last || t - last.t > 10 * 60000 || last.pct !== data.batt) {
     battLog.push({ t, pct: data.batt });
     battLog = battLog.filter(p => t - p.t < 60 * 86400000).slice(-500);
-    if (!location.search.includes("demo")) localStorage.setItem(BATT_KEY, JSON.stringify(battLog));
+    if (!location.search.includes("demo") && !SIM) localStorage.setItem(BATT_KEY, JSON.stringify(battLog));
   }
 }
 
@@ -381,13 +391,13 @@ const parse = {
 };
 
 async function connect() {
-  if (!navigator.bluetooth) {
+  if (!BT) {
     setStatus("Ta przeglądarka nie obsługuje Bluetooth — użyj Chrome na Androidzie.", "err");
     return;
   }
   try {
     setStatus("Wybierz czujnik z listy…", "wait");
-    device = await navigator.bluetooth.requestDevice({
+    device = await BT.requestDevice({
       filters: [{ name: DEVICE_NAME }, { services: [SVC] }],
       optionalServices: [SVC, "battery_service"],
     });
@@ -505,7 +515,7 @@ $("btnClose").onclick = () => {
   if (settings.wake) requestWake(); else if (wakeLock) wakeLock.release();
 };
 
-if (!navigator.bluetooth && !location.search.includes("demo")) {
+if (!BT && !location.search.includes("demo")) {
   $("supportHint").innerHTML = "<span class='err'>Ta przeglądarka nie obsługuje Web Bluetooth.</span> " +
     "Otwórz stronę w <b>Chrome na Androidzie</b> (adres https).";
 }
